@@ -1,4 +1,4 @@
-/* Copyright (c) 2014-2017, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2014-2016, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -29,6 +29,13 @@
 #include "leds.h"
 #include <linux/debugfs.h>
 #include <linux/uaccess.h>
+
+//BEGIN<20160601>wangyanhui add for front flash	
+#if defined(CONFIG_LEDS_MSM_GPIO_DUAL_REAR_FLASH_AND_FRONT_FLASH)	
+#include <linux/gpio.h>
+#include <linux/of_gpio.h>
+#endif
+//END<20160601>wangyanhui add for front flash	
 
 #define FLASH_LED_PERIPHERAL_SUBTYPE(base)			(base + 0x05)
 #define FLASH_SAFETY_TIMER(base)				(base + 0x40)
@@ -116,6 +123,7 @@
 #define	FLASH_LED_MODULE_CTRL_DEFAULT				0x60
 #define	FLASH_LED_CURRENT_READING_DELAY_MIN			5000
 #define	FLASH_LED_CURRENT_READING_DELAY_MAX			5001
+// #define PMI8996_SUBTYPE					19
 #define	FLASH_LED_OPEN_FAULT_DETECTED				0xC
 
 #define FLASH_UNLOCK_SECURE					0xA5
@@ -138,6 +146,11 @@ enum flash_led_id {
 	FLASH_LED_0 = 0,
 	FLASH_LED_1,
 	FLASH_LED_SWITCH,
+//BEGIN<20160601>wangyanhui add for front flash	
+#if defined(CONFIG_LEDS_MSM_GPIO_DUAL_REAR_FLASH_AND_FRONT_FLASH)	
+	FLASH_LED_FRONT,
+#endif
+//END<20160601>wangyanhui add for front flash
 };
 
 enum flash_led_type {
@@ -219,16 +232,20 @@ struct flash_led_platform_data {
 	bool				mask3_en;
 	bool				follow_rb_disable;
 	bool				die_current_derate_en;
+
+//BEGIN<20160601>wangyanhui add for front flash
+#if defined(CONFIG_LEDS_MSM_GPIO_DUAL_REAR_FLASH_AND_FRONT_FLASH)
+	unsigned front_flash_gpio_mode;
+	unsigned front_flash_gpio_en;	
+#endif
+//END<20160601>wangyanhui add for front flash
 };
 
 struct qpnp_flash_led_buffer {
-	struct		mutex debugfs_lock; /* Prevent thread concurrency */
-	size_t		rpos;
-	size_t		wpos;
-	size_t		len;
-	struct		qpnp_flash_led *led;
-	u32		buffer_cnt;
-	char		data[0];
+	size_t rpos;
+	size_t wpos;
+	size_t len;
+	char data[0];
 };
 
 /*
@@ -246,8 +263,10 @@ struct qpnp_flash_led {
 	struct workqueue_struct		*ordered_workq;
 	struct qpnp_vadc_chip		*vadc_dev;
 	struct mutex			flash_led_lock;
+	struct qpnp_flash_led_buffer	*log;
 	struct dentry			*dbgfs_root;
 	int				num_leds;
+	u32				buffer_cnt;
 	u16				base;
 	u16				current_addr;
 	u16				current2_addr;
@@ -278,11 +297,10 @@ static int flash_led_dbgfs_file_open(struct qpnp_flash_led *led,
 	log->rpos = 0;
 	log->wpos = 0;
 	log->len = logbufsize - sizeof(*log);
-	mutex_init(&log->debugfs_lock);
-	log->led = led;
+	led->log = log;
 
-	log->buffer_cnt = 1;
-	file->private_data = log;
+	led->buffer_cnt = 1;
+	file->private_data = led;
 
 	return 0;
 }
@@ -296,30 +314,24 @@ static int flash_led_dfs_open(struct inode *inode, struct file *file)
 
 static int flash_led_dfs_close(struct inode *inode, struct file *file)
 {
-	struct qpnp_flash_led_buffer *log = file->private_data;
+	struct qpnp_flash_led *led = file->private_data;
 
-	if (log) {
+	if (led && led->log) {
 		file->private_data = NULL;
-		mutex_destroy(&log->debugfs_lock);
-		kfree(log);
+		kfree(led->log);
 	}
 
 	return 0;
 }
 
-#define MIN_BUFFER_WRITE_LEN		20
 static int print_to_log(struct qpnp_flash_led_buffer *log,
 					const char *fmt, ...)
 {
 	va_list args;
 	int cnt;
-	char *log_buf;
+	char *log_buf = &log->data[log->wpos];
 	size_t size = log->len - log->wpos;
 
-	if (size < MIN_BUFFER_WRITE_LEN)
-		return 0;	/* not enough buffer left */
-
-	log_buf = &log->data[log->wpos];
 	va_start(args, fmt);
 	cnt = vscnprintf(log_buf, size, fmt, args);
 	va_end(args);
@@ -330,23 +342,15 @@ static int print_to_log(struct qpnp_flash_led_buffer *log,
 
 static ssize_t flash_led_dfs_latched_reg_read(struct file *fp, char __user *buf,
 					size_t count, loff_t *ppos) {
-	struct qpnp_flash_led_buffer *log = fp->private_data;
-	struct qpnp_flash_led *led;
+	struct qpnp_flash_led *led = fp->private_data;
+	struct qpnp_flash_led_buffer *log = led->log;
 	u8 val;
-	int rc = 0;
+	int rc;
 	size_t len;
 	size_t ret;
 
-	if (!log) {
-		pr_err("error: file private data is NULL\n");
-		return -EFAULT;
-	}
-	led = log->led;
-
-	mutex_lock(&log->debugfs_lock);
-	if ((log->rpos >= log->wpos && log->buffer_cnt == 0) ||
-			((log->len - log->wpos) < MIN_BUFFER_WRITE_LEN))
-		goto unlock_mutex;
+	if (log->rpos >= log->wpos && led->buffer_cnt == 0)
+		return 0;
 
 	rc = spmi_ext_register_readl(led->spmi_dev->ctrl,
 		led->spmi_dev->sid, INT_LATCHED_STS(led->base), &val, 1);
@@ -354,17 +358,17 @@ static ssize_t flash_led_dfs_latched_reg_read(struct file *fp, char __user *buf,
 		dev_err(&led->spmi_dev->dev,
 				"Unable to read from address %x, rc(%d)\n",
 				INT_LATCHED_STS(led->base), rc);
-		goto unlock_mutex;
+		return -EINVAL;
 	}
-	log->buffer_cnt--;
+	led->buffer_cnt--;
 
 	rc = print_to_log(log, "0x%05X ", INT_LATCHED_STS(led->base));
 	if (rc == 0)
-		goto unlock_mutex;
+		return rc;
 
 	rc = print_to_log(log, "0x%02X ", val);
 	if (rc == 0)
-		goto unlock_mutex;
+		return rc;
 
 	if (log->wpos > 0 && log->data[log->wpos - 1] == ' ')
 		log->data[log->wpos - 1] = '\n';
@@ -374,49 +378,36 @@ static ssize_t flash_led_dfs_latched_reg_read(struct file *fp, char __user *buf,
 	ret = copy_to_user(buf, &log->data[log->rpos], len);
 	if (ret) {
 		pr_err("error copy register value to user\n");
-		rc = -EFAULT;
-		goto unlock_mutex;
+		return -EFAULT;
 	}
 
 	len -= ret;
 	*ppos += len;
 	log->rpos += len;
 
-	rc = len;
-
-unlock_mutex:
-	mutex_unlock(&log->debugfs_lock);
-	return rc;
+	return len;
 }
 
 static ssize_t flash_led_dfs_fault_reg_read(struct file *fp, char __user *buf,
 					size_t count, loff_t *ppos) {
-	struct qpnp_flash_led_buffer *log = fp->private_data;
-	struct qpnp_flash_led *led;
-	int rc = 0;
+	struct qpnp_flash_led *led = fp->private_data;
+	struct qpnp_flash_led_buffer *log = led->log;
+	int rc;
 	size_t len;
 	size_t ret;
 
-	if (!log) {
-		pr_err("error: file private data is NULL\n");
-		return -EFAULT;
-	}
-	led = log->led;
+	if (log->rpos >= log->wpos && led->buffer_cnt == 0)
+		return 0;
 
-	mutex_lock(&log->debugfs_lock);
-	if ((log->rpos >= log->wpos && log->buffer_cnt == 0) ||
-			((log->len - log->wpos) < MIN_BUFFER_WRITE_LEN))
-		goto unlock_mutex;
-
-	log->buffer_cnt--;
+	led->buffer_cnt--;
 
 	rc = print_to_log(log, "0x%05X ", FLASH_LED_FAULT_STATUS(led->base));
 	if (rc == 0)
-		goto unlock_mutex;
+		return rc;
 
 	rc = print_to_log(log, "0x%02X ", led->fault_reg);
 	if (rc == 0)
-		goto unlock_mutex;
+		return rc;
 
 	if (log->wpos > 0 && log->data[log->wpos - 1] == ' ')
 		log->data[log->wpos - 1] = '\n';
@@ -426,19 +417,14 @@ static ssize_t flash_led_dfs_fault_reg_read(struct file *fp, char __user *buf,
 	ret = copy_to_user(buf, &log->data[log->rpos], len);
 	if (ret) {
 		pr_err("error copy register value to user\n");
-		rc = -EFAULT;
-		goto unlock_mutex;
+		return -EFAULT;
 	}
 
 	len -= ret;
 	*ppos += len;
 	log->rpos += len;
 
-	rc = len;
-
-unlock_mutex:
-	mutex_unlock(&log->debugfs_lock);
-	return rc;
+	return len;
 }
 
 static ssize_t flash_led_dfs_fault_reg_enable(struct file *file,
@@ -450,22 +436,11 @@ static ssize_t flash_led_dfs_fault_reg_enable(struct file *file,
 	int data;
 	size_t ret = 0;
 
-	struct qpnp_flash_led_buffer *log = file->private_data;
-	struct qpnp_flash_led *led;
-	char *kbuf;
+	struct qpnp_flash_led *led = file->private_data;
+	char *kbuf = kmalloc(count + 1, GFP_KERNEL);
 
-	if (!log) {
-		pr_err("error: file private data is NULL\n");
-		return -EFAULT;
-	}
-	led = log->led;
-
-	mutex_lock(&log->debugfs_lock);
-	kbuf = kmalloc(count + 1, GFP_KERNEL);
-	if (!kbuf) {
-		ret = -ENOMEM;
-		goto unlock_mutex;
-	}
+	if (!kbuf)
+		return -ENOMEM;
 
 	ret = copy_from_user(kbuf, buf, count);
 	if (!ret) {
@@ -494,8 +469,6 @@ static ssize_t flash_led_dfs_fault_reg_enable(struct file *file,
 
 free_buf:
 	kfree(kbuf);
-unlock_mutex:
-	mutex_unlock(&log->debugfs_lock);
 	return ret;
 }
 
@@ -507,22 +480,11 @@ static ssize_t flash_led_dfs_dbg_enable(struct file *file,
 	int cnt = 0;
 	int data;
 	size_t ret = 0;
-	struct qpnp_flash_led_buffer *log = file->private_data;
-	struct qpnp_flash_led *led;
-	char *kbuf;
+	struct qpnp_flash_led *led = file->private_data;
+	char *kbuf = kmalloc(count + 1, GFP_KERNEL);
 
-	if (!log) {
-		pr_err("error: file private data is NULL\n");
-		return -EFAULT;
-	}
-	led = log->led;
-
-	mutex_lock(&log->debugfs_lock);
-	kbuf = kmalloc(count + 1, GFP_KERNEL);
-	if (!kbuf) {
-		ret = -ENOMEM;
-		goto unlock_mutex;
-	}
+	if (!kbuf)
+		return -ENOMEM;
 
 	ret = copy_from_user(kbuf, buf, count);
 	if (ret == count) {
@@ -550,8 +512,6 @@ static ssize_t flash_led_dfs_dbg_enable(struct file *file,
 
 free_buf:
 	kfree(kbuf);
-unlock_mutex:
-	mutex_unlock(&log->debugfs_lock);
 	return ret;
 }
 
@@ -1230,7 +1190,7 @@ error_regulator_enable:
 
 	return rc;
 }
-
+extern int msm_sensor_is_front_camera(void);
 static void qpnp_flash_led_work(struct work_struct *work)
 {
 	struct flash_node_data *flash_node = container_of(work,
@@ -1238,30 +1198,82 @@ static void qpnp_flash_led_work(struct work_struct *work)
 	struct qpnp_flash_led *led =
 			dev_get_drvdata(&flash_node->spmi_dev->dev);
 	union power_supply_propval psy_prop;
-	int rc, brightness;
+	int rc, brightness = flash_node->cdev.brightness;
 	int max_curr_avail_ma = 0;
 	int total_curr_ma = 0;
 	int i;
 	u8 val;
-
-	/* Global lock is to synchronize between the flash leds and torch */
+	#if 0
+			flash_node->id = msm_sensor_is_front_camera();
+			//BEGIN<20150826><add for dual flash >wangyanhui
+			 if(flash_node->id == 0)
+				 flash_node->trigger = 0x80;
+			 else	 if(flash_node->id == 1)
+				 flash_node->trigger = 0x40;
+			//END<20150826><add for dual flash >wangyanhui
+	#endif
 	mutex_lock(&led->flash_led_lock);
-	/* Local lock is to synchronize for one led instance */
-	mutex_lock(&flash_node->cdev.led_access);
 
-	brightness = flash_node->cdev.brightness;
+//BEGIN<20160601>wangyanhui add for front flash
+#if defined(CONFIG_LEDS_MSM_GPIO_DUAL_REAR_FLASH_AND_FRONT_FLASH)
+	if (flash_node->id == FLASH_LED_FRONT) 
+	{
+		if (!brightness)
+		{
+			if (gpio_is_valid(led->pdata->front_flash_gpio_en)) 
+				gpio_set_value(led->pdata->front_flash_gpio_en, 0);
+			if (gpio_is_valid(led->pdata->front_flash_gpio_mode)) 
+				gpio_set_value(led->pdata->front_flash_gpio_mode, 0);		
+			flash_node->flash_on = false;
+			mutex_unlock(&led->flash_led_lock);
+			return;
+		}
+		if (flash_node->type == TORCH)	
+		{	
+			if (gpio_is_valid(led->pdata->front_flash_gpio_en)) 
+				gpio_set_value(led->pdata->front_flash_gpio_en, 1);
+			if (gpio_is_valid(led->pdata->front_flash_gpio_mode)) 
+				gpio_set_value(led->pdata->front_flash_gpio_mode, 0);				
+		}
+		else
+		{
+			if (gpio_is_valid(led->pdata->front_flash_gpio_en)) 
+				gpio_set_value(led->pdata->front_flash_gpio_en, 1);
+			if (gpio_is_valid(led->pdata->front_flash_gpio_mode)) 
+				gpio_set_value(led->pdata->front_flash_gpio_mode, 1);				
+		}	
+		flash_node->flash_on = true;
+		mutex_unlock(&led->flash_led_lock);
+		return;
+	}
+#endif
+//END<20160601>wangyanhui add for front flash
+
 	if (!brightness)
 		goto turn_off;
-
+	
+//BEGIN<20160525><modify for front camera>xiongdajun
+	#if (defined(CONFIG_PROJECT_P7701))||(defined(CONFIG_PROJECT_P7705))  
+	if ((led->open_fault)&&msm_sensor_is_front_camera()) {
+		dev_err(&led->spmi_dev->dev, "Open fault detected\n");
+		mutex_unlock(&led->flash_led_lock);
+		return;
+	}
+	#else
 	if (led->open_fault) {
 		dev_err(&led->spmi_dev->dev, "Open fault detected\n");
-		goto unlock_mutex;
+		mutex_unlock(&led->flash_led_lock);
+		return;
 	}
+	#endif
+//End<20160525><modify for front camera>xiongdajun
 
 	if (!flash_node->flash_on && flash_node->num_regulators > 0) {
 		rc = flash_regulator_enable(led, flash_node, true);
-		if (rc)
-			goto unlock_mutex;
+		if (rc) {
+			mutex_unlock(&led->flash_led_lock);
+			return;
+		}
 	}
 
 	if (!led->gpio_enabled && led->pinctrl) {
@@ -1276,6 +1288,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 	}
 
 	if (led->dbg_feature_en) {
+
 		rc = qpnp_led_masked_write(led->spmi_dev,
 						INT_SET_TYPE(led->base),
 						FLASH_STATUS_REG_MASK, 0x1F);
@@ -1333,31 +1346,65 @@ static void qpnp_flash_led_work(struct work_struct *work)
 		}
 
 		if (flash_node->id == FLASH_LED_SWITCH) {
-			#ifdef CONFIG_PROJECT_GARLIC
-				if(flash_node->prgm_current)
-					flash_node->prgm_current = 150;
-			#endif
+                    //Begin xiongdajun modify flash current
+		   #if defined(CONFIG_PROJECT_P7701) 
+                    if(flash_node->prgm_current)
+                        flash_node->prgm_current = 150;
+           #endif
+
+		   #if defined(CONFIG_PROJECT_P7705)
+		            if(flash_node->prgm_current)
+                        flash_node->prgm_current = 100;
+           #endif
+
+           //jiangwei begin
+           #if defined(CONFIG_PROJECT_GARLIC) 
+                    if(flash_node->prgm_current)
+                        flash_node->prgm_current = 150;
+           #endif
+           //jiangwei end
+                    //END xiongdajun modify flash current
 			val = (u8)(flash_node->prgm_current *
 						FLASH_TORCH_MAX_LEVEL
 						/ flash_node->max_current);
 			rc = qpnp_led_masked_write(led->spmi_dev,
 						led->current_addr,
 						FLASH_CURRENT_MASK, val);
+			printk("Ramiel TORCH (0) FLASH_LED_SWITCH prgm_current= %d \n",flash_node->prgm_current);
+			printk("Ramiel TORCH (0) FLASH_LED_SWITCH MAX= %d \n",flash_node->max_current);
+			printk("Ramiel TORCH (0) FLASH_LED_SWITCH  %d \n",val);
 			if (rc) {
 				dev_err(&led->spmi_dev->dev,
 					"Torch reg write failed\n");
 				goto exit_flash_led_work;
 			}
-			#ifdef CONFIG_PROJECT_GARLIC
-				if(flash_node->prgm_current2)
-					flash_node->prgm_current2 = 150;
-			#endif
+                    //Begin xiongdajun modify flash current
+					#if defined(CONFIG_PROJECT_P7701)
+                    if(flash_node->prgm_current2)
+                        flash_node->prgm_current2 = 60;
+                    #endif
+					#if  defined(CONFIG_PROJECT_P7705)
+                    if(flash_node->prgm_current2)
+                        flash_node->prgm_current2 = 40;
+                    #endif
+
+	           //jiangwei begin
+	           #if defined(CONFIG_PROJECT_GARLIC) 
+	                    if(flash_node->prgm_current2)
+	                        flash_node->prgm_current2 = 150;
+	           #endif
+	           //jiangwei end
+	           
+                    //END xiongdajun modify flash current
 			val = (u8)(flash_node->prgm_current2 *
 						FLASH_TORCH_MAX_LEVEL
 						/ flash_node->max_current);
 			rc = qpnp_led_masked_write(led->spmi_dev,
 					led->current2_addr,
 					FLASH_CURRENT_MASK, val);
+			printk("Ramiel TORCH (1) FLASH_LED_SWITCH prgm_current2= %d \n",flash_node->prgm_current2);
+			printk("Ramiel TORCH (1) FLASH_LED_SWITCH MAX= %d \n",flash_node->max_current);
+			printk("Ramiel TORCH (1) FLASH_LED_SWITCH  %d \n",val);
 			if (rc) {
 				dev_err(&led->spmi_dev->dev,
 					"Torch reg write failed\n");
@@ -1371,6 +1418,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 				rc = qpnp_led_masked_write(led->spmi_dev,
 						led->current_addr,
 						FLASH_CURRENT_MASK, val);
+			printk("Ramiel TORCH (0) NOT FLASH_LED_SWITCH  %d \n",val);
 				if (rc) {
 					dev_err(&led->spmi_dev->dev,
 						"current reg write failed\n");
@@ -1380,6 +1428,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 				rc = qpnp_led_masked_write(led->spmi_dev,
 						led->current2_addr,
 						FLASH_CURRENT_MASK, val);
+			printk("Ramiel TORCH (1) NOT FLASH_LED_SWITCH  %d \n",val);
 				if (rc) {
 					dev_err(&led->spmi_dev->dev,
 						"current reg write failed\n");
@@ -1405,7 +1454,6 @@ static void qpnp_flash_led_work(struct work_struct *work)
 				"Module enable reg write failed\n");
 			goto exit_flash_led_work;
 		}
-
 		if (led->pdata->hdrm_sns_ch0_en ||
 						led->pdata->hdrm_sns_ch1_en) {
 			if (flash_node->id == FLASH_LED_SWITCH) {
@@ -1536,27 +1584,64 @@ static void qpnp_flash_led_work(struct work_struct *work)
 					(flash_node->prgm_current2 *
 					max_curr_avail_ma) / total_curr_ma;
 			}
-			#ifdef CONFIG_PROJECT_GARLIC
-			if(flash_node->prgm_current)
-				flash_node->prgm_current = 750;
+                    //Begin xiongdajun modify flash current
+			#if defined(CONFIG_PROJECT_P7701) 
+                    if(flash_node->prgm_current)
+                        flash_node->prgm_current = 1000;
+            #endif
+
+			#if  defined(CONFIG_PROJECT_P7705)
+					if(flash_node->prgm_current)
+					    flash_node->prgm_current = 1000;
 		    #endif
+
+		    //jiangwei begin
+		    #if  defined(CONFIG_PROJECT_GARLIC)
+					if(flash_node->prgm_current)
+					    flash_node->prgm_current = 750;
+		    #endif
+		    //jiangwei end
+                    //END xiongdajun modify flash current
 			val = (u8)(flash_node->prgm_current *
 				FLASH_MAX_LEVEL / flash_node->max_current);
 			rc = qpnp_led_masked_write(led->spmi_dev,
 				led->current_addr, FLASH_CURRENT_MASK, val);
+
+			printk("Ramiel FLASH (0) NOT FLASH_LED_SWITCH prgm_current= %d \n",flash_node->prgm_current);
+			printk("Ramiel FLASH (0) NOT FLASH_LED_SWITCH MAX= %d \n",flash_node->max_current);
+			printk("Ramiel FLASH (0) NOT FLASH_LED_SWITCH  %d \n",val);
 			if (rc) {
 				dev_err(&led->spmi_dev->dev,
 					"Current register write failed\n");
 				goto exit_flash_led_work;
 			}
-			#ifdef CONFIG_PROJECT_GARLIC
-			if(flash_node->prgm_current2)
-				flash_node->prgm_current2 = 750;
+                    //Begin xiongdajun modify flash current
+					#if defined(CONFIG_PROJECT_P7701)
+                    if(flash_node->prgm_current2)
+                        flash_node->prgm_current2 = 100;
+                    #endif
+
+					#if  defined(CONFIG_PROJECT_P7705)
+				    if(flash_node->prgm_current2)
+						flash_node->prgm_current2 = 50;
+				    #endif
+		    //jiangwei begin
+		    #if  defined(CONFIG_PROJECT_GARLIC)
+					if(flash_node->prgm_current2)
+					    flash_node->prgm_current2 = 750;
 		    #endif
+		    //jiangwei end                    //END xiongdajun modify flash current
 			val = (u8)(flash_node->prgm_current2 *
 				FLASH_MAX_LEVEL / flash_node->max_current);
+
+			printk("Ramiel FLASH (1) NOT FLASH_LED_SWITCH prgm_current2= %d \n",flash_node->prgm_current2);
+			printk("Ramiel FLASH (1) NOT FLASH_LED_SWITCH MAX= %d \n",flash_node->max_current);
+			printk("Ramiel FLASH (1) NOT FLASH_LED_SWITCH  %d \n",val);
+
+					
 			rc = qpnp_led_masked_write(led->spmi_dev,
 				led->current2_addr, FLASH_CURRENT_MASK, val);
+
 			if (rc) {
 				dev_err(&led->spmi_dev->dev,
 					"Current register write failed\n");
@@ -1580,6 +1665,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 					led->spmi_dev,
 					led->current_addr,
 					FLASH_CURRENT_MASK, val);
+				printk("Ramiel FLASH_LED_0 FLASH (1) NOT FLASH_LED_SWITCH  %d \n",val);
 				if (rc) {
 					dev_err(&led->spmi_dev->dev,
 						"current reg write failed\n");
@@ -1590,6 +1676,7 @@ static void qpnp_flash_led_work(struct work_struct *work)
 					led->spmi_dev,
 					led->current2_addr,
 					FLASH_CURRENT_MASK, val);
+				printk("Ramiel FLASH_LED_1 FLASH (1) NOT FLASH_LED_SWITCH  %d \n",val);
 				if (rc) {
 					dev_err(&led->spmi_dev->dev,
 						"current reg write failed\n");
@@ -1730,8 +1817,6 @@ static void qpnp_flash_led_work(struct work_struct *work)
 	}
 
 	flash_node->flash_on = true;
-unlock_mutex:
-	mutex_unlock(&flash_node->cdev.led_access);
 	mutex_unlock(&led->flash_led_lock);
 
 	return;
@@ -1751,8 +1836,12 @@ turn_off:
 				"Failed to read out fault status register\n");
 			goto exit_flash_led_work;
 		}
-
+		
+#if (defined(CONFIG_PROJECT_P7701))||(defined(CONFIG_PROJECT_P7705))  
 		led->open_fault |= (val & FLASH_LED_OPEN_FAULT_DETECTED);
+#endif
+
+	
 	}
 
 	rc = qpnp_led_masked_write(led->spmi_dev,
@@ -1800,15 +1889,15 @@ exit_flash_hdrm_sns:
 	}
 exit_flash_led_work:
 	rc = qpnp_flash_led_module_disable(led, flash_node);
-	if (rc)
+	if (rc) {
 		dev_err(&led->spmi_dev->dev, "Module disable failed\n");
-
+		goto exit_flash_led_work;
+	}
 error_enable_gpio:
 	if (flash_node->flash_on && flash_node->num_regulators > 0)
 		flash_regulator_enable(led, flash_node, false);
 
 	flash_node->flash_on = false;
-	mutex_unlock(&flash_node->cdev.led_access);
 	mutex_unlock(&led->flash_led_lock);
 
 	return;
@@ -2433,6 +2522,50 @@ static int qpnp_flash_led_parse_common_dt(
 			return PTR_ERR(led->gpio_state_suspend);
 		}
 	}
+//BEGIN<20160601>wangyanhui add for front flash
+#if defined(CONFIG_LEDS_MSM_GPIO_DUAL_REAR_FLASH_AND_FRONT_FLASH)
+	led->pdata->front_flash_gpio_mode = of_get_named_gpio(node,
+			"qcom,front_flash_gpio_mode", 0);
+	if (gpio_is_valid(led->pdata->front_flash_gpio_mode)) {
+		rc = gpio_request(led->pdata->front_flash_gpio_mode,
+				"front_flash_gpio_mode");
+		if (rc) {
+			pr_err("front_flash_gpio_mode request fail \n");
+			gpio_free(led->pdata->front_flash_gpio_mode);
+			return -EINVAL;
+		}
+
+		rc = gpio_direction_output(led->pdata->front_flash_gpio_mode, 1);
+		if (rc) {
+			pr_err("front_flash_gpio_mode set dir fail \n");
+			gpio_free(led->pdata->front_flash_gpio_mode);
+			return -EINVAL;
+		}
+		gpio_set_value(led->pdata->front_flash_gpio_mode, 0);
+	}
+	
+	led->pdata->front_flash_gpio_en = of_get_named_gpio(node,
+			"qcom,front_flash_gpio_en", 0);	
+
+	if (gpio_is_valid(led->pdata->front_flash_gpio_en)) {
+		rc = gpio_request(led->pdata->front_flash_gpio_en,
+				"front_flash_gpio_en");
+		if (rc) {
+			pr_err("front_flash_gpio_en request fail \n");
+			gpio_free(led->pdata->front_flash_gpio_en);
+			return -EINVAL;
+		}
+
+		rc = gpio_direction_output(led->pdata->front_flash_gpio_en, 1);
+		if (rc) {
+			pr_err("front_flash_gpio_en set dir fail \n");
+			gpio_free(led->pdata->front_flash_gpio_en);
+			return -EINVAL;
+		}
+		gpio_set_value(led->pdata->front_flash_gpio_en, 0);
+	}
+#endif
+//END<20160601>wangyanhui add for front flash
 
 	return 0;
 }
@@ -2528,7 +2661,7 @@ static int qpnp_flash_led_probe(struct spmi_device *spmi)
 	}
 
 	for_each_child_of_node(node, temp) {
-		j = -1;
+		j = -1;	
 		led->flash_node[i].cdev.brightness_set =
 						qpnp_flash_led_brightness_set;
 		led->flash_node[i].cdev.brightness_get =
