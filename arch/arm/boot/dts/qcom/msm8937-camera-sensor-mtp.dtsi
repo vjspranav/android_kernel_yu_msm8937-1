@@ -190,7 +190,7 @@
 		qcom,csid-sd-index = <1>;
 		qcom,mount-angle = <90>;
 		qcom,eeprom-src = <&eeprom1>;
-		qcom,led-flash-src = <&led_flash1>;
+		qcom,led-flash-src = <&led_flash0>;
                 cam_vdig-supply = <&pm8937_l23>;
 		cam_vana-supply = <&pm8937_l22>;
 		cam_vio-supply = <&pm8937_l6>;
