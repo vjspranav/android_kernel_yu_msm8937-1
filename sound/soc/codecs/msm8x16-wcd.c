@@ -5564,9 +5564,9 @@ static int msm8x16_wcd_device_down(struct snd_soc_codec *codec)
 	pdata = snd_soc_card_get_drvdata(codec->component.card);
 	dev_dbg(codec->dev, "%s: device down!\n", __func__);
 	msm8x16_wcd_write(codec,
-		MSM8X16_WCD_A_ANALOG_TX_1_EN, 0x3);
+		MSM8X16_WCD_A_ANALOG_TX_1_EN, 0x33);//(0x03) yangliang modify to avoid modem-reset resulting in mic-snd small 20160420
 	msm8x16_wcd_write(codec,
-		MSM8X16_WCD_A_ANALOG_TX_2_EN, 0x3);
+		MSM8X16_WCD_A_ANALOG_TX_2_EN, 0x33);//(0x03) yangliang modify to avoid modem-reset resulting in mic-snd small 20160420
 	if (msm8x16_wcd_priv->boost_option == BOOST_ON_FOREVER) {
 		if ((snd_soc_read(codec, MSM8X16_WCD_A_ANALOG_SPKR_DRV_CTL)
 			& 0x80) == 0) {
