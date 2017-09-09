@@ -909,7 +909,7 @@ static int qpnp_mpp_set(struct qpnp_led_data *led)
 						led->mpp_cfg->pwm_cfg->pwm_dev,
 						1000000,
 						1000000);
-			}//<20160329><add for green led output high not wait 2s>wangyanhui add
+			}//<20160329><add for green led output high not wait 2s>wangyanhui add 
 			else
 			{
 				/*config pwm for brightness scaling*/
@@ -930,7 +930,7 @@ static int qpnp_mpp_set(struct qpnp_led_data *led)
 						period_us * NSEC_PER_USEC);
 				}
 			}
-
+			
 			if (rc < 0) {
 				dev_err(&led->spmi_dev->dev, "Failed to " \
 					"configure pwm for new values\n");
@@ -2626,7 +2626,7 @@ static void led_blink(struct qpnp_led_data *led,
 //BEGIN<20160324><blinking use pwm>wangyanhui modify
 	if(led->cdev.brightness>0)
 		led->cdev.brightness = 153;
-
+	
 	qpnp_mpp_set(led);
 #if 0
 	flush_work(&led->work);
@@ -2669,7 +2669,7 @@ static void led_blink(struct qpnp_led_data *led,
 		}
 	}
 	mutex_unlock(&led->lock);
-#endif
+#endif	
 //END<20160324><blinking use pwm>wangyanhui modify
 }
 
