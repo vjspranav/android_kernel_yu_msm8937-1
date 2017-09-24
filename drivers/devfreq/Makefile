@@ -19,6 +19,7 @@ obj-$(CONFIG_DEVFREQ_GOV_MSM_CACHE_HWMON)	+= governor_cache_hwmon.o
 obj-$(CONFIG_DEVFREQ_GOV_MSM_GPUBW_MON)        += governor_gpubw_mon.o
 obj-$(CONFIG_DEVFREQ_GOV_MSM_GPUBW_MON)	+= governor_bw_vbif.o
 obj-$(CONFIG_DEVFREQ_GOV_SPDM_HYP) 	+= governor_spdm_bw_hyp.o
+obj-$(CONFIG_DEVFREQ_GOV_CONSERVATIVE)	+= governor_conservative.o
 obj-$(CONFIG_DEVFREQ_GOV_MEMLAT)	+= governor_memlat.o
 
 # DEVFREQ Drivers

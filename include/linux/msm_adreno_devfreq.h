@@ -74,6 +74,14 @@ struct msm_busmon_extended_profile {
 #ifdef CONFIG_DEVFREQ_GOV_MSM_GPUBW_MON
 int devfreq_vbif_update_bw(unsigned long ib, unsigned long ab);
 int devfreq_vbif_register_callback(void *);
+
 #endif
+
+struct devfreq_conservative_data {
+	struct {
+		unsigned long total_time;
+		unsigned long busy_time;
+	} bin;
+};
 
 #endif
