@@ -1172,4 +1172,9 @@ config TOUCHSCREEN_FT5XX
          To compile this driver as a module, choose M here: the
          module will be called ft5xx_ts.
 
+config TOUCHSCREEN_IST30XX
+	bool "IMAGES touchpanel IST30XX series"
+	depends on I2C
+
+source "drivers/input/touchscreen/IST30xx/Kconfig"
 endif
